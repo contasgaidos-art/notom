@@ -1,1 +1,99 @@
+name: Compilar para Safari
 
+# Roda SÓ quando você clicar em "Run workflow" na aba Actions.
+#
+# Por que não a cada envio: em repositório privado, o plano gratuito
+# dá 2.000 minutos por mês, e máquina macOS consome 10 por minuto
+# real — cerca de 200 minutos de verdade. Se rodasse sozinho a cada
+# correção enviada, o mês acabaria sem você perceber.
+on:
+  workflow_dispatch:
+    inputs:
+      versao:
+        description: 'Número da versão (ex.: 1.1)'
+        required: false
+        default: ''
+
+jobs:
+  construir:
+    # A máquina precisa ser macOS: o conversor da Apple e o Xcode
+    # só existem lá. Em repositório público isso é gratuito.
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Mostrar a versão do Xcode
+        run: xcodebuild -version
+
+      - name: Ajustar a versão, se informada
+        if: inputs.versao != ''
+        run: |
+          # troca só o valor de "version" no manifesto
+          python3 - <<'PY'
+          import json
+          m = json.load(open('manifest.json'))
+          m['version'] = "${{ inputs.versao }}"
+          json.dump(m, open('manifest.json','w'), indent=2, ensure_ascii=False)
+          print('versão da extensão:', m['version'])
+          PY
+
+      - name: Converter a extensão para o formato do Safari
+        run: |
+          # O conversor gera um projeto Xcode com duas partes: um app
+          # que serve de casca e a extensão dentro dele. É assim que o
+          # Safari (e o iPhone) recebem extensões.
+          xcrun safari-web-extension-converter . \
+            --project-location build \
+            --app-name "No Tom" \
+            --bundle-identifier br.com.notomapp.safari \
+            --no-open \
+            --no-prompt \
+            --force \
+            --swift \
+            --copy-resources
+
+      - name: Ver o que foi gerado
+        run: |
+          echo "--- estrutura do projeto ---"
+          find build -maxdepth 3 -name "*.xcodeproj" -o -maxdepth 3 -type d | head -20
+
+      - name: Compilar sem assinatura (confere se o projeto está íntegro)
+        run: |
+          # Sem conta da Apple não dá para assinar. Compilamos assim
+          # mesmo: serve para saber se o projeto está sadio e se o
+          # código não tem erro. O app resultante NÃO instala em
+          # aparelho — para isso é preciso assinar (veja o LEIA-ME).
+          PROJ=$(find build -name "*.xcodeproj" | head -1)
+          echo "projeto: $PROJ"
+          xcodebuild build \
+            -project "$PROJ" \
+            -scheme "No Tom (iOS)" \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | tail -40
+
+      - name: Guardar o projeto para você baixar
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoTom-Safari-projeto
+          path: build/
+          retention-days: 30
+
+      - name: O que fazer com isso
+        run: |
+          echo ""
+          echo "==============================================="
+          echo " O projeto foi gerado e compila sem erro."
+          echo ""
+          echo " Baixe o pacote 'NoTom-Safari-projeto' na aba"
+          echo " Artifacts, abra no Xcode de um Mac, escolha o"
+          echo " seu time de desenvolvedor e rode no iPhone."
+          echo ""
+          echo " Sem conta da Apple (US\$ 99/ano) o app não"
+          echo " instala em aparelho nenhum, nem no seu."
+          echo "==============================================="
