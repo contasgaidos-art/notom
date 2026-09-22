@@ -1,0 +1,155 @@
+# ============================================================
+#  No Tom — iPhone (extensão do Safari) pelo Codemagic
+# ============================================================
+#  Mesmo caminho do StageUp: você envia pelo git-enviar.bat, o
+#  Codemagic compila numa máquina Mac, assina com a sua conta
+#  Apple e o app aparece no TestFlight do iPhone.
+#
+#  No iPhone o No Tom é uma extensão do Safari — um app nativo
+#  não consegue capturar o som de outro app, a Apple não deixa.
+#  O conversor da Apple embrulha a extensão num app "casca".
+#
+#  ANTES DA PRIMEIRA VEZ, troque os DOIS nomes marcados com
+#  <<< abaixo pelos mesmos que estão no codemagic.yaml do StageUp.
+# ============================================================
+
+workflows:
+  notom-ios:
+    name: No Tom — iPhone
+    instance_type: mac_mini_m2
+    max_build_duration: 40
+
+    integrations:
+      app_store_connect: NOME_DA_INTEGRACAO      # <<< igual ao do StageUp
+
+    environment:
+      groups:
+        - GRUPO_DA_ASSINATURA                    # <<< igual ao do StageUp (tem a CERTIFICATE_PRIVATE_KEY)
+      xcode: latest
+      vars:
+        APP_NOME: "No Tom"
+        BUNDLE_APP: "br.com.notomapp.safari"
+
+    # Compila sozinho quando você envia — mas só se mudou algo que
+    # entra no app. Mexer em LEIA-ME ou nos .bat não gasta minuto.
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+      cancel_previous_builds: true
+    when:
+      changeset:
+        includes:
+          - 'manifest.json'
+          - '*.js'
+          - '*.png'
+          - 'codemagic.yaml'
+
+    scripts:
+      - name: Separar os arquivos da extensão
+        script: |
+          set -e
+          # Copia só o que é da extensão para uma pasta limpa. Se o
+          # conversor lesse a raiz, levaria junto .bat, LEIA-ME e o
+          # próprio codemagic.yaml para dentro do app.
+          rm -rf ext build
+          mkdir ext
+          for f in manifest.json conteudo.js motor.js pagina.js icone-48.png icone-128.png; do
+            if [ ! -f "$f" ]; then echo "::error::faltou o arquivo $f na raiz do repositório"; exit 1; fi
+            cp "$f" ext/
+          done
+          ls -la ext
+
+      - name: Converter para Safari (só iPhone)
+        script: |
+          set -e
+          xcrun safari-web-extension-converter ext \
+            --project-location build \
+            --app-name "$APP_NOME" \
+            --bundle-identifier "$BUNDLE_APP" \
+            --ios-only \
+            --swift \
+            --copy-resources \
+            --no-open --no-prompt --force
+          PROJ=$(find build -maxdepth 3 -name "*.xcodeproj" | head -1)
+          if [ -z "$PROJ" ]; then echo "::error::o conversor não gerou projeto"; exit 1; fi
+          echo "PROJ=$PROJ" >> $CM_ENV
+          echo "projeto: $PROJ"
+
+      - name: Versão, ícone e ajustes da App Store
+        script: |
+          set -e
+          # versão = a do manifest.json; número da compilação = o do Codemagic
+          VERSAO=$(python3 -c "import json;print(json.load(open('ext/manifest.json'))['version'])")
+          NUMERO=$PROJECT_BUILD_NUMBER
+          echo "versão $VERSAO, compilação $NUMERO"
+
+          # App e extensão precisam ter exatamente a mesma versão,
+          # senão a Apple recusa o envio.
+          find build -name Info.plist -not -path "*/build/Build/*" | while read P; do
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSAO" "$P" 2>/dev/null \
+              || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSAO" "$P"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUMERO" "$P" 2>/dev/null \
+              || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $NUMERO" "$P"
+            # evita a pergunta de criptografia a cada envio
+            /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$P" 2>/dev/null || true
+            echo "ajustado: $P"
+          done
+
+          # O projeto também guarda a versão nas configurações de build:
+          # sem isto, elas podem sobrescrever o Info.plist na compilação.
+          sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $VERSAO;/g" "$PROJ/project.pbxproj"
+          sed -i '' -E "s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = $NUMERO;/g" "$PROJ/project.pbxproj"
+
+          # Ícone de 1024: a App Store não aceita app sem ele.
+          find build -type d -name "AppIcon.appiconset" | while read D; do
+            rm -f "$D"/*.png
+            cp icone-app-1024.png "$D/icone-1024.png"
+            cat > "$D/Contents.json" <<'JSON'
+          {
+            "images" : [
+              { "filename" : "icone-1024.png", "idiom" : "universal",
+                "platform" : "ios", "size" : "1024x1024" }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          JSON
+            echo "ícone aplicado: $D"
+          done
+
+      - name: Assinatura com a conta Apple
+        script: |
+          set -e
+          keychain initialize
+          # O app e a extensão são dois alvos, cada um com seu perfil.
+          # Lê os identificadores do próprio projeto em vez de adivinhar.
+          IDS=$(xcodebuild -project "$PROJ" -showBuildSettings -json -alltargets 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(sorted({t['buildSettings'].get('PRODUCT_BUNDLE_IDENTIFIER','') for t in json.load(sys.stdin)} - {''})))")
+          echo "identificadores: $IDS"
+          for ID in $IDS; do
+            app-store-connect fetch-signing-files "$ID" \
+              --type IOS_APP_STORE \
+              --certificate-key=@env:CERTIFICATE_PRIVATE_KEY \
+              --create
+          done
+          keychain add-certificates
+          xcode-project use-profiles --project "$PROJ"
+
+      - name: Compilar o .ipa
+        script: |
+          set -e
+          ESQUEMA=$(xcodebuild -list -json -project "$PROJ" \
+            | python3 -c "import json,sys; s=json.load(sys.stdin)['project']['schemes']; print(next(x for x in s if 'Extension' not in x))")
+          echo "esquema: $ESQUEMA"
+          xcode-project build-ipa --project "$PROJ" --scheme "$ESQUEMA"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
