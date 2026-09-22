@@ -1,6 +1,6 @@
 workflows:
   notom-ios:
-    name: No Tom — iPhone
+    name: No Tom - iPhone
     instance_type: mac_mini_m2
     max_build_duration: 40
 
@@ -8,6 +8,8 @@ workflows:
       app_store_connect: codemagic
 
     environment:
+      groups:
+        - assinatura_apple
       xcode: latest
       vars:
         APP_NOME: "No Tom"
@@ -54,12 +56,13 @@ workflows:
           echo "PROJ=$PROJ" >> $CM_ENV
           echo "projeto: $PROJ"
 
-      - name: Versao e icone
+      - name: Identificadores, versao e icone
         script: |
           set -e
           VERSAO=$(python3 -c "import json;print(json.load(open('ext/manifest.json'))['version'])")
           NUMERO=$PROJECT_BUILD_NUMBER
           echo "versao $VERSAO, compilacao $NUMERO"
+
           find build -name Info.plist -not -path "*/build/Build/*" | while read P; do
             /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSAO" "$P" 2>/dev/null \
               || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSAO" "$P"
@@ -67,8 +70,24 @@ workflows:
               || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $NUMERO" "$P"
             /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$P" 2>/dev/null || true
           done
+
           sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $VERSAO;/g" "$PROJ/project.pbxproj"
           sed -i '' -E "s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = $NUMERO;/g" "$PROJ/project.pbxproj"
+
+          PROJ="$PROJ" BUNDLE_APP="$BUNDLE_APP" python3 - <<'PY'
+          import re, os
+          caminho = os.environ['PROJ'] + '/project.pbxproj'
+          base = os.environ['BUNDLE_APP']
+          texto = open(caminho).read()
+          def trocar(m):
+              atual = m.group(1).strip()
+              novo = base + '.Extension' if atual.endswith('.Extension') else base
+              return 'PRODUCT_BUNDLE_IDENTIFIER = %s;' % novo
+          texto, n = re.subn(r'PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);', trocar, texto)
+          open(caminho, 'w').write(texto)
+          print('identificadores ajustados em', n, 'lugares')
+          PY
+
           find build -type d -name "AppIcon.appiconset" | while read D; do
             rm -f "$D"/*.png
             cp icone-app-1024.png "$D/icone-1024.png"
@@ -83,12 +102,16 @@ workflows:
           IDS=$(xcodebuild -project "$PROJ" -showBuildSettings -json -alltargets 2>/dev/null \
             | python3 -c "import json,sys; print(' '.join(sorted({t['buildSettings'].get('PRODUCT_BUNDLE_IDENTIFIER','') for t in json.load(sys.stdin)} - {''})))")
           echo "identificadores: $IDS"
-          CHAVE=""
-          if [ -n "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
-            CHAVE="--certificate-key=@env:CERTIFICATE_PRIVATE_KEY"
+          if [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
+            echo "A variavel CERTIFICATE_PRIVATE_KEY nao chegou ao build."
+            echo "Confira: grupo assinatura_apple no app notom, com a chave marcada como Secure."
+            exit 1
           fi
           for ID in $IDS; do
-            app-store-connect fetch-signing-files "$ID" --type IOS_APP_STORE $CHAVE --create
+            app-store-connect fetch-signing-files "$ID" \
+              --type IOS_APP_STORE \
+              --certificate-key=@env:CERTIFICATE_PRIVATE_KEY \
+              --create
           done
           keychain add-certificates
           xcode-project use-profiles --project "$PROJ"
