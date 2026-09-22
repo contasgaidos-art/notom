@@ -1,24 +1,30 @@
 {
   "manifest_version": 3,
   "name": "No Tom",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Ouça o YouTube no tom que você toca, sem alterar a velocidade.",
-  "permissions": [],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "*://*.youtube.com/*",
-    "*://*.youtu.be/*"
+    "*://*.youtu.be/*",
+    "*://*.youtube-nocookie.com/*",
+    "*://*.google.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
         "*://*.youtube.com/*",
-        "*://*.youtu.be/*"
+        "*://*.youtu.be/*",
+        "*://*.youtube-nocookie.com/*",
+        "*://*.google.com/*"
       ],
       "js": [
         "conteudo.js"
       ],
-      "run_at": "document_idle",
-      "all_frames": false
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [
@@ -29,7 +35,9 @@
       ],
       "matches": [
         "*://*.youtube.com/*",
-        "*://*.youtu.be/*"
+        "*://*.youtu.be/*",
+        "*://*.youtube-nocookie.com/*",
+        "*://*.google.com/*"
       ]
     }
   ],
